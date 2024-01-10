@@ -1,0 +1,2374 @@
+-----------------------------------------------------------------------
+-- Imported Scripts
+-----------------------------------------------------------------------
+
+-- Import Utility Scripts
+import("cardinal.scar")							-- Contains sfx references, UI templates, and Civ/Age helper functions
+import("ScarUtil.scar")							-- Contains game helper functions
+
+-- Import Gameplay Systems
+import("gameplay/score.scar")					-- Tracks player score
+import("gameplay/diplomacy.scar")				-- Manages Tribute
+
+-- Import Win Conditions		
+-- Support for eliminating a player when they can no longer fight or produce units
+import("winconditions/elimination.scar")		-- Support for player quitting or dropping (through pause menu or disconnection)
+import("winconditions/ownsurrender.scar")			-- Support for player surrender (through pause menu)
+import("winconditions/ownreligious.scar")
+
+-- Import UI Support
+import("gameplay/chi/current_dynasty_ui.scar")	-- Displays Chinese Dynasty UI
+
+
+-----------------------------------------------------------------------
+-- Data
+-----------------------------------------------------------------------
+
+-- Global data table that can be referenced in script functions (e.g. _mod.module = "Mod")
+_annihilation = {
+	is_diplomacy_enabled = false,
+	is_tribute_enabled = true,
+	players_with_market = {},
+	type_map = {	-- Type map of building type to cheapest squad it can produce. Used to cache squad costs.
+		town_center 	= "villager",
+		barracks		= "spearman",
+		archery_range 	= "archer",
+		stable 			= "horseman",
+		siege_workshop 	= "springald",
+		monastery 		= "monk", 
+	},	
+	types = { -- Building types used to identify landmarks and wonders
+		landmark = "wonder",
+		wonder = "wonder_imperial_age",
+		building = "building", 
+	},
+	sfx = {
+		eliminated_player_ally = "Conquest_friendly_eliminated",
+		eliminated_enemy = "Conquest_enemy_eliminated",
+		victory = "mus_stinger_landmark_objective_complete_success",
+		defeat = "mus_stinger_landmark_objective_complete_fail",
+	},
+	cue = {						-- event cue shown when player is eliminated 
+		title = Loc_Empty(),
+		desc = Loc_Empty(),
+		sfx = "sfx_ui_event_queue_high_priority_play",
+		icon = "icons\\event_queue_high_priority_large",
+		template = "high_priority", 
+		style = ECV_Queue | ECV_Title,
+	},
+}
+
+_modKills200 = {
+	module = "Mod",
+	objective_title = "$8f562a7c3cdd4c94ba70f17cbd71a64b:4",
+	objective_requirement = 20,
+	options = {},
+	icons = {
+		objective = "icons\\races\\common\\victory_conditions\\victory_condition_conquest",
+	},
+}
+
+
+_modKillCastles = {
+	module = "Mod",
+	objective_title = "$8f562a7c3cdd4c94ba70f17cbd71a64b:6",
+	objective_requirement = 1,
+	options = {},
+	icons = {
+		objective = "icons\\races\\common\\victory_conditions\\victory_condition_conquest",
+	},
+}
+
+_modKillGates = {
+	module = "Mod",
+	objective_title = "$8f562a7c3cdd4c94ba70f17cbd71a64b:5",
+	objective_requirement = 1,
+	options = {},
+	icons = {
+		objective = "icons\\races\\common\\victory_conditions\\victory_condition_conquest",
+	},
+}
+
+
+-- Register the win condition (Some functions can be prepended with "Mod_" to be called automatically as part of the scripting framework)
+Core_RegisterModule(_modKills200.module)
+
+-----------------------------------------------------------------------
+-- Scripting framework 
+-----------------------------------------------------------------------
+
+-- Called during load as part of the game setup sequence
+function Mod_OnGameSetup()
+	
+	
+	
+end
+
+-- Called before initialization, preceding other module OnInit functions
+function Mod_PreInit()
+	
+	-- Enable Tribute UI
+	Core_CallDelegateFunctions("TributeEnabled", true)
+	
+end
+
+-- Called on match initialization before handing control to the player
+function Mod_OnInit()
+	localPlayer = Core_GetPlayersTableEntry(Game_GetLocalPlayer())
+	Mod_SetResources()
+	Mod_ExploreMap()
+	Rule_AddGlobalEvent(Mod_StoreKills, GE_EntityKilled)
+	Rule_AddGlobalEvent(Mod_StoreGate, GE_EntityKilled)
+	Mod_FindCastle()
+	Mod_FindGate()
+	Mod_SpawnCastles()
+	Rule_AddInterval(Mod_SpawnUnits, player_spawnrate)
+	Rule_AddInterval(Mod_GiveResources, 600)
+	Rule_AddGlobalEvent(Mod_CastleDeath, GE_EntityKilled)
+	
+end
+
+-- Called after initialization is done when game is fading up from black
+function Mod_Start()
+	Mod_SetupObjectiveKillCastles()
+	Mod_SetupObjectiveKills200()
+	Mod_SetupObjectiveKillGates()
+end
+
+-- Called when Core_SetPlayerDefeated() is invoked. Signals that a player has been eliminated from play due to defeat.
+function Mod_OnPlayerDefeated(player, reason)
+	
+	end
+	
+
+-- When a victory condition is met, a module must call Core_OnGameOver() in order to invoke this delegate and notify all modules that the match is about to end. Generally used for clean up (removal of rules, objectives, and UI elements specific to the module).
+function Mod_OnGameOver()
+	
+	
+	
+end
+
+
+
+---------------------------FUNCTIONS---------------------------
+function Mod_GiveResources()
+	for i, player in pairs(PLAYERS) do
+		Player_AddResource(player.id, RT_Food, 50000)
+		Player_AddResource(player.id, RT_Wood, 50000)
+		Player_AddResource(player.id, RT_Gold, 50000)
+		Player_AddResource(player.id, RT_Stone, 50000)
+		
+		if player.isLocal then
+			
+			local event_cue_text = Loc_FormatText("$8f562a7c3cdd4c94ba70f17cbd71a64b:7", 40000)
+			
+			UI_CreateEventCueClickable(-1, 10, -1, 0, event_cue_text, "", "low_priority", "", "sfx_ui_event_queue_low_priority_play", 255, 255, 255, 255, ECV_Queue, nothing)
+		end
+	end
+end
+
+function Mod_SetResources()
+	for i, player in pairs(PLAYERS) do
+		player.kills = 0
+		player.Gatekills = 0
+		Player_SetCurrentAge(player.id, 2)
+		player.castles = 4
+	
+		
+		Player_SetResource(player.id, RT_Food, 99999)		
+		Player_SetResource(player.id, RT_Wood, 99999)
+		Player_SetResource(player.id, RT_Gold, 99999)
+		Player_SetResource(player.id, RT_Stone, 99999)
+		
+		
+		Player_SetMaxPopulation(player.id, CT_Personnel, 200)
+		local player_civ = Player_GetRaceName(player.id)
+		if player_civ == "hre" then
+
+			player.pop = 80
+			player.GateRequired = 2
+			player.KillsAge3Required = 300
+			player.KillsAge4Required = 750
+			elseif player_civ == "sultanate" then
+			    player_spawnrate = 4
+			    player.pop = 80
+				player.GateRequired = 3
+			    player.KillsAge3Required = 350
+			    player.KillsAge4Required = 900
+			elseif player_civ == "french" then
+			    player_spawnrate = 6
+			    player.pop = 80
+				player.GateRequired = 2
+			    player.KillsAge3Required = 250
+			    player.KillsAge4Required = 800
+			elseif player_civ == "chinese" then
+			    player_spawnrate = 2
+			    player.pop = 90
+				player.GateRequired = 2
+			    player.KillsAge3Required = 250
+			    player.KillsAge4Required = 750
+			elseif player_civ == "english" then
+			    
+			    player.pop = 90
+				player.GateRequired = 1
+			    player.KillsAge3Required = 250
+			    player.KillsAge4Required = 700
+			elseif player_civ == "rus" then
+			    
+			    player.pop = 70
+				player.GateRequired = 2
+			    player.KillsAge3Required = 300
+			    player.KillsAge4Required = 700
+			elseif player_civ == "mongol" then
+			    
+			    player.pop = 80
+				player.GateRequired = 1
+			    player.KillsAge3Required = 250
+			    player.KillsAge4Required = 700
+			elseif player_civ == "malian" then
+			   
+			    player.pop = 100
+				player.GateRequired = 1
+			    player.KillsAge3Required = 200
+			    player.KillsAge4Required = 550
+			elseif player_civ == "ottoman" then
+			   
+			    player.pop = 80
+				player.GateRequired = 1
+			    player.KillsAge3Required = 300
+			    player.KillsAge4Required = 700
+			elseif player_civ == "japanese" then
+			    
+			    player.pop = 80
+				player.GateRequired = 2
+			    player.KillsAge3Required = 300
+			    player.KillsAge4Required = 850
+			elseif player_civ == "byzantine" then
+			    
+			    player.pop = 70
+				player.GateRequired = 2
+			    player.KillsAge3Required = 250
+			    player.KillsAge4Required = 800
+			elseif player_civ == "abbasid_ha_01" then
+			  
+			    player.pop = 80
+				player.GateRequired = 2
+			    player.KillsAge3Required = 250
+			    player.KillsAge4Required = 750
+			elseif player_civ == "french_ha_01" then
+			    
+			    player.pop = 75
+				player.GateRequired = 1
+			    player.KillsAge3Required = 300
+			    player.KillsAge4Required = 800
+			elseif player_civ == "chinese_ha_01" then
+			   
+			    player.pop = 75
+				player.GateRequired = 3
+			    player.KillsAge3Required = 200
+		 	    player.KillsAge4Required = 650
+		   elseif player_civ == "abbasid" then
+			  
+			    player.pop = 80
+			    player.GateRequired = 1
+			    player.KillsAge3Required = 250
+			    player.KillsAge4Required = 750
+		   elseif player_civ == "hre_ha_01" then
+			  
+			    player.pop = 80
+				player.GateRequired = 2
+			    player.KillsAge3Required = 300
+			    player.KillsAge4Required = 800
+				
+				
+			end
+		end
+	end 
+ 
+function Mod_ExploreMap()
+	for i, player in pairs(PLAYERS) do
+		FOW_PlayerExploreAll(player.id)
+	end
+end
+
+function Mod_SpawnCastles()
+	Mod_SpawnBuilding()
+	Mod_SpawnBuilding2()
+	Mod_SpawnBuilding3()
+	Mod_SpawnBuilding4()
+	Mod_SpawnBuilding5()
+	Mod_SpawnBuilding6()
+	Mod_SpawnBuilding7()
+	Mod_SpawnBuilding8()
+end
+
+function Mod_FindCastle()
+	
+	-- This is a for loop that does something for each player in the match.
+	-- PLAYERS is a table that contains all of the players in the match.
+	-- If there are two players it will run twice, if there are eight players it will run eight times, etc.
+	for i, player in pairs(PLAYERS) do
+		
+		-- Get the player's entities and place them into an ENTITY GROUP
+		local eg_player_entities = Player_GetEntities(player.id)
+		-- Filter out everything in the ENTITY GROUP except for the Town Center
+		EGroup_Filter(eg_player_entities, "castle", FILTER_KEEP)
+		-- Get the Town Center ENTITY by getting the first entry in the ENTITY GROUP we just filtered
+		local entity =  EGroup_GetEntityAt(eg_player_entities, 1)
+		-- Get the Town Center's ENTITY ID
+		-- Some functions require the ENTITY ID to perform an action on the ENTITY
+		local entity_id = Entity_GetID(entity) 
+		-- Get the Town Center's position
+		local position = Entity_GetPosition(entity)
+		
+		-- Store the player's Town Center information so it can be referenced later
+		player.castle = {
+			entity = entity,
+			entity_id = entity_id,
+			position = position,
+		}
+		
+	end
+end
+
+function Mod_FindGate()
+	
+	-- This is a for loop that does something for each player in the match.
+	-- PLAYERS is a table that contains all of the players in the match.
+	-- If there are two players it will run twice, if there are eight players it will run eight times, etc.
+	for i, player in pairs(PLAYERS) do
+		
+		-- Get the player's entities and place them into an ENTITY GROUP
+		local eg_player_entities = Player_GetEntities(player.id)
+		-- Filter out everything in the ENTITY GROUP except for the Town Center
+		EGroup_Filter(eg_player_entities, "gate", FILTER_KEEP)
+		-- Get the Town Center ENTITY by getting the first entry in the ENTITY GROUP we just filtered
+		local entity =  EGroup_GetEntityAt(eg_player_entities, 1)
+		-- Get the Town Center's ENTITY ID
+		-- Some functions require the ENTITY ID to perform an action on the ENTITY
+		local entity_id = Entity_GetID(entity) 
+		-- Get the Town Center's position
+		local position = Entity_GetPosition(entity)
+		
+		-- Store the player's Town Center information so it can be referenced later
+		player.gate = {
+			entity = entity,
+			entity_id = entity_id,
+			position = position,
+		}
+		
+	end
+end
+
+function Mod_SpawnUnits()
+
+	for i, player in pairs(PLAYERS) do
+		if player.isEliminated == false then
+			
+			local CurrentPopulation = Player_GetCurrentPopulation(player.id,CT_Personnel)
+			if CurrentPopulation < player.pop then
+				local player_civ = Player_GetRaceName(player.id)
+
+
+				local sbp_unique
+
+				if player_civ == "english" then
+						
+					sbp_unique = BP_GetSquadBlueprint("unit_archer_2_eng")
+
+				elseif player_civ == "chinese" then
+
+					sbp_unique = BP_GetSquadBlueprint("unit_repeater_crossbowman_2_chi")
+
+				elseif player_civ == "french" then
+
+					sbp_unique = BP_GetSquadBlueprint("unit_manatarms_3_fre")
+
+				elseif player_civ == "hre" then
+
+					sbp_unique = BP_GetSquadBlueprint("unit_landsknecht_3_hre")
+
+				elseif player_civ == "mongol" then
+
+					sbp_unique = BP_GetSquadBlueprint("unit_horsearcher_2_mon")
+
+				elseif player_civ == "rus" then
+
+					-- Get the Age 4 Rus Spearman Blueprint
+					sbp_unique = BP_GetSquadBlueprint("unit_knight_2_rus")
+
+				elseif player_civ == "sultanate" then
+
+					-- Get the Age 4 Delhi Sultanate Spearman Blueprint
+					sbp_unique = BP_GetSquadBlueprint("unit_war_elephant_3_sul")
+
+				elseif player_civ == "abbasid" then
+
+					-- Get the Age 4 Abbasid Spearman Blueprint
+					sbp_unique = BP_GetSquadBlueprint("unit_camel_archer_2_abb")
+				elseif player_civ == "malian" then
+
+					sbp_unique = BP_GetSquadBlueprint("unit_javelin_2_mal")
+					
+				elseif player_civ == "ottoman" then
+
+					-- Get the ottoman unit Blueprint
+					sbp_unique = BP_GetSquadBlueprint("unit_handcannon_3_ott")
+					
+				elseif player_civ == "japanese" then
+					
+					-- Get the japanese unit Blueprint
+					sbp_unique = BP_GetSquadBlueprint("unit_samurai_2_jpn")
+					
+				elseif player_civ == "byzantine" then
+					
+					-- Get the byzantine unit Blueprint
+					sbp_unique = BP_GetSquadBlueprint("unit_knight_3_byz")
+						
+				elseif player_civ == "abbasid_ha_01" then
+					
+					-- Get the ayyubid unit Blueprint
+					sbp_unique = BP_GetSquadBlueprint("unit_mamluk_2_abb_ha_01")
+				elseif player_civ == "french_ha_01" then
+					
+					-- Get the jean arc unit Blueprint
+					sbp_unique = BP_GetSquadBlueprint("unit_rally_crossbowman_3_fre_ha_01")
+				elseif player_civ == "hre_ha_01" then
+					
+					-- Get the OOTD unit Blueprint
+					sbp_unique = BP_GetSquadBlueprint("unit_holy_order_teuton_cru")
+				elseif player_civ == "chinese_ha_01" then
+					
+					-- Get the Zhu Xi unit Blueprint
+					sbp_unique = BP_GetSquadBlueprint("unit_firelancer_3_chi")
+
+
+
+
+				end
+				local unitcount = player.castles
+				local spawn_position = Util_GetOffsetPosition(player.castle.position, player.unitwalkspawn, 10)
+				local sgroup_name = "sg_player_unique_" .. tostring(player.id)
+				local sg_player_unique = SGroup_CreateIfNotFound(sgroup_name)
+				UnitEntry_DeploySquads(player.id, sg_player_unique, {{sbp = sbp_unique, numSquads = unitcount }}, spawn_position)
+				local move_position = Util_GetOffsetPosition(player.castle.position, player.unitwalk, 30) 
+				Cmd_FormationMove(sg_player_unique, player.moveposition, false)
+				SGroup_Destroy(sg_player_unique)
+				
+			end
+		end
+	end
+end
+
+function Mod_SetupObjectiveKills200()
+	for i, player in pairs(PLAYERS) do
+		-- Check if an objective has not been created yet
+		if _modKills200.objective == nil then 
+			
+			-- Create and store objective in the global table created at the start of this script
+			_modKills200.objective = Obj_Create(player.id, _modKills200.objective_title, Loc_Empty(), _modKills200.icons.objective, "ConquestObjectiveTemplate", player.raceName, OT_Primary, 0, "conquestObj")		
+			
+			-- Sets the objective's state to incomplete
+			Obj_SetState(_modKills200.objective, OS_Incomplete)
+			-- Sets the objective to visible so players can see it
+			Obj_SetVisible(_modKills200.objective, true)		
+			-- Sets the objective progress type to a counter
+			Obj_SetCounterType(_modKills200.objective, COUNTER_CountUpTo)
+			-- Set the starting objective progress to 1 because we spawn a House for the player in Mod_SpawnBuilding()
+			Obj_SetCounterCount(_modKills200.objective, localPlayer.kills)
+			-- Set the maximum objective progress
+			Obj_SetCounterMax(_modKills200.objective, localPlayer.KillsAge3Required)
+			-- Set the objective progress bar percentage value
+			Obj_SetProgress(_modKills200.objective, 0 / localPlayer.KillsAge3Required)
+			
+		end
+	end
+end
+
+function Mod_SetupObjectiveKillCastles()
+		
+		-- Check if an objective has not been created yet
+		if _modKillCastles.objective == nil then 
+			
+			-- Create and store objective in the global table created at the start of this script
+			_modKillCastles.objective = Obj_Create(localPlayer.id, _modKillCastles.objective_title, Loc_Empty(), _modKillCastles.icons.objective, "ConquestObjectiveTemplate", localPlayer.raceName, OT_Primary, 0, "conquestObj")		
+			
+			-- Sets the objective's state to incomplete
+			Obj_SetState(_modKillCastles.objective, OS_Incomplete)
+			-- Sets the objective to visible so players can see it
+			Obj_SetVisible(_modKillCastles.objective, true)
+		end
+	end
+
+function Mod_SetupObjectiveKillGates()
+		for i, player in pairs(PLAYERS) do
+		-- Check if an objective has not been created yet
+		if _modKillGates.objective == nil then 
+			
+			-- Create and store objective in the global table created at the start of this script
+			_modKillGates.objective = Obj_Create(player.id, _modKillGates.objective_title, Loc_Empty(), _modKillGates.icons.objective, "ConquestObjectiveTemplate", player.raceName, OT_Primary, 0, "conquestObj")		
+			
+			-- Sets the objective's state to incomplete
+			Obj_SetState(_modKillGates.objective, OS_Incomplete)
+			-- Sets the objective to visible so players can see it
+			Obj_SetVisible(_modKillGates.objective, true)		
+			-- Sets the objective progress type to a counter
+			Obj_SetCounterType(_modKillGates.objective, COUNTER_CountUpTo)
+			-- Set the starting objective progress to 1 because we spawn a House for the player in Mod_SpawnBuilding()
+			Obj_SetCounterCount(_modKillGates.objective, localPlayer.Gatekills)
+			-- Set the maximum objective progress
+			Obj_SetCounterMax(_modKillGates.objective, localPlayer.GateRequired)
+			
+			end
+		end
+	end
+
+function Mod_CastleDeath()
+	
+	for i, player in pairs(PLAYERS) do
+		local eg_player_entities = Player_GetEntities(player.id)
+		EGroup_Filter(eg_player_entities, "castle", FILTER_KEEP)
+		player.castles =  EGroup_Count(eg_player_entities)
+		if player.castles == 0 and player.isEliminated == false then
+			local sg_afval_units = Player_GetSquads(player.id)		
+		    SGroup_Kill(sg_afval_units)
+		    SGroup_DeSpawn(sg_afval_units)
+		    SGroup_Clear(sg_afval_units)		
+		    local eg_afval_buildings = Player_GetAllEntities(player.id)	
+		    EGroup_DestroyAllEntities(eg_afval_buildings)	
+		    EGroup_Destroy(eg_afval_buildings)
+			World_KillPlayer(player.id, KPR_Lost)
+			Core_SetPlayerDefeated(player.id, Mod_LoserPresentation, WR_CONQUEST)
+			player.isEliminated = true
+			Annihilation_CheckVictory()
+		end 
+	end
+end
+
+function Mod_StoreKills(context)
+	
+	if context ~= nil and context.victim ~= nil and Entity_IsOfType(context.victim, "human") or Entity_IsOfType(context.victim, "cavalry") then
+		if context.killer==nil then
+			return
+		else
+			local entity = Entity_FromID(context.killer.EntityID)
+			local rewardedPlayer = Util_GetPlayerOwner(entity)
+			
+			if rewardedPlayer == nil then
+				return
+			else
+				for i, player in pairs(PLAYERS) do
+					
+					if rewardedPlayer == player.id then
+							player.kills = player.kills + 1
+							local obj_progress_new = localPlayer.kills
+							local age = Player_GetCurrentAge(player.id)
+							Obj_SetCounterCount(_modKills200.objective, obj_progress_new)
+							if player.kills == player.KillsAge3Required or player.kills == player.KillsAge4Required then
+								Player_SetCurrentAge(player.id, age + 1)
+								if localPlayer.kills >= localPlayer.KillsAge3Required then
+									Obj_SetCounterCount(_modKills200.objective, obj_progress_new)
+									-- Set the maximum objective progress
+									Obj_SetCounterMax(_modKills200.objective, localPlayer.KillsAge4Required)
+									if localPlayer.kills >= localPlayer.KillsAge4Required then
+										Obj_SetVisible(_modKills200.objective, false)
+									end
+								end
+							end
+						end 
+					end
+				end
+			end
+		end
+	end 
+
+function Mod_StoreGate(context)
+	
+	if context ~= nil and context.victim ~= nil and Entity_IsOfType(context.victim, "gate") or Entity_IsOfType(context.victim, "building") then
+		
+		if context.killer==nil or context.victimOwner==nil then 
+				return
+			else
+				local entity = Entity_FromID(context.killer.EntityID)
+				local rewardedPlayer = Util_GetPlayerOwner(entity)
+				
+				if rewardedPlayer == nil then
+					return
+				else
+					for i, player in pairs(PLAYERS) do
+						
+						if rewardedPlayer == player.id then
+							player.Gatekills = player.Gatekills + 1
+							local obj_progress_new = localPlayer.Gatekills
+							Obj_SetCounterCount(_modKillGates.objective, obj_progress_new)
+							if player.Gatekills == player.GateRequired then
+								
+								local player_civ = Player_GetRaceName(player.id)
+								
+								
+								local sbp_spearman
+								
+								
+								if player_civ == "english" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_eng")
+									
+								elseif player_civ == "chinese" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_chi")
+									
+								elseif player_civ == "french" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_fre")
+									
+								elseif player_civ == "hre" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_hre")
+									
+								elseif player_civ == "mongol" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_mon")
+									
+								elseif player_civ == "rus" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_rus")
+									
+								elseif player_civ == "sultanate" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_sul")
+									
+								elseif player_civ == "abbasid" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_abb")
+								elseif player_civ == "malian" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_mal")
+								elseif player_civ == "ottoman" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_ott")
+								elseif player_civ == "japanese" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_jpn")
+								elseif player_civ == "byzantine" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_byz")
+								elseif player_civ == "abbasid_ha_01" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_abb_ha_01")
+								elseif player_civ == "hre_ha_01" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_hre_ha_01")
+								elseif player_civ == "french_ha_01" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_fre_ha_01")
+								elseif player_civ == "chinese_ha_01" then
+									
+									sbp_spearman = BP_GetSquadBlueprint("unit_villager_1_chi_ha_01")
+									
+								end
+								
+								local spawn_position = Util_GetOffsetPosition(player.castle.position, player.unitwalkspawn, 10)
+								
+								local sgroup_name = "sg_player_spearmen_" .. tostring(player.id)
+								local sg_player_spearmen = SGroup_CreateIfNotFound(sgroup_name)
+								
+								UnitEntry_DeploySquads(player.id, sg_player_spearmen, {{sbp = sbp_spearman, numSquads = 2 }}, player.spawnpositionvillager)
+								
+								player.GateRequired = player.GateRequired + 1
+								if player.id == localPlayer.id then
+									Obj_SetVisible(_modKillGates.objective, false)
+									Music_PlayStinger(MUS_STING_PRIMARY_OBJ_COMPLETE)
+								end
+							end
+						end
+					end
+				end 
+			end
+		end
+	end
+
+function Annihilation_CheckVictory()
+	
+	-- Track one of the surviving players
+	local winning_player = nil
+	
+	-- For all players
+	for i, player in pairs(PLAYERS) do
+		
+		-- If player is not eliminated
+		if not Core_IsPlayerEliminated(player.id) then 
+			
+			-- Get remaining enemies of player
+			local enemies_remaining = Annihilation_GetActiveEnemyCount(player)
+			
+			-- If no enemies remain
+			if enemies_remaining == 0 then
+				-- Track player
+				winning_player = player
+				break
+			end
+		end
+	end
+	
+	if winning_player ~= nil then
+		
+		-- For every player
+		for i, player in pairs(PLAYERS) do
+			
+			-- If player is winning player's ally
+			if Player_ObserveRelationship(player.id, winning_player.id) == R_ALLY then
+				Core_SetPlayerVictorious(player.id, Annihilation_WinnerPresentation, WR_ANNIHILATION)	
+			end
+		end
+	-- If a winning player was not found, check if no humans remain
+	else
+		
+		-- Track humans remaining
+		local humansRemaining = {}
+		for i, player in pairs(PLAYERS) do
+			if (not player.isEliminated) and Player_IsHuman(player.id) then
+				table.insert(humansRemaining, player)
+			end
+		end
+		
+		-- If no humans remain, resolve match as winnerless. This gracefully resolves matches where the last human player surrenders in an AI game with RelicLink.
+		if #humansRemaining == 0 then
+			Core_OnGameOver()
+			Core_WinnerlessGameOver(Annihilation_LoserPresentation, WR_ANNIHILATION)
+		end
+	end
+end
+
+function Annihilation_LoserPresentation(playerID)
+	if playerID == Game_GetLocalPlayer() then
+		
+			-- Clear player's selection
+			Misc_ClearSelection()
+			-- Hide UI
+			Taskbar_SetVisibility(false)		
+			-- Set Win Condition Objective to failed
+			Obj_SetState(_mod.objective, OS_Failed)
+
+			-- Trigger objective complete pop up
+			Obj_CreatePopup(_mod.objective, _mod.objective_title)
+			-- Play Victory sfx
+			Music_PlayStinger(MUS_STING_PRIMARY_OBJ_FAIL)
+			-- Set objective to invisible
+			Obj_SetVisible(_mod.objective, false)
+
+			-- Create Defeat Stinger
+			Rule_AddOneShot(_gameOver_message, 
+				GAMEOVER_OBJECTIVE_TIME, {
+					_playerID = playerID, 
+					_icon = _mod.icons.objective, 
+					_endType = Loc_GetString(11045235), 					-- "DEFEAT"  
+					_message = Loc_Empty(),
+					_sound = "mus_stinger_landmark_objective_complete_fail", 
+				_videoURI = "stinger_defeat"})
+		end
+	end
+
+function Annihilation_WinnerPresentation(playerID)
+	if playerID == Game_GetLocalPlayer() then
+		
+		Rule_AddOneShot(_gameOver_message, 
+			GAMEOVER_OBJECTIVE_TIME, { 
+			_playerID = playerID, 
+			_icon = nil,											-- Unused 
+			_endType = Loc_GetString(11161277), 					-- "VICTORY"  
+			_message = Loc_Empty(),									-- Unused 
+			_sound = _annihilation.sfx.victory, 
+			_videoURI = "stinger_victory" 
+		})
+
+	end
+end
+
+function Annihilation_GetActiveEnemyCount(player)
+	
+	-- Track enemies remaining
+	local enemies_remaining = {}
+	
+	-- For every other player
+	for i, player_other in pairs(PLAYERS) do
+		
+		-- If other player is not the given player, is an enemy, and is not eliminated
+		if player ~= player_other and not Core_IsPlayerEliminated(player_other.id) and Player_ObserveRelationship(player.id, player_other.id) == R_ENEMY then 
+			
+			-- Add enemy player to table
+			table.insert(enemies_remaining, player_other)
+		end
+	end
+	
+	-- Return number of enemies remaining
+	return #enemies_remaining
+end
+
+
+---------------------------CASTLE SPAWNS---------------------------
+-----------------------------------------Player 1---------------------------------------------------------------------------------------------------------------------------------
+function Mod_SpawnBuilding()
+	for i, player in pairs(PLAYERS) do
+		local startX = -76
+		local startY = 8
+		local startZ = 184
+		local ps = Player_GetStartingPosition(player.id)
+		local nx = 5 * math.floor(math.floor(ps.x) / 5)
+		local ny = 5 * math.floor(math.floor(ps.y) / 5)
+		local nz = 5 * math.floor(math.floor(ps.z) / 5)
+		-- this is position at which building will appear
+		local psx = World_Pos(nx + 20, ny, nz + 5)
+		-- this vector is used for rotation target, so building is facing correctly toward camera
+		local pst = World_Pos(nx + 20, ny, nz + 10)
+		--Castle 2
+		local psx2 = World_Pos(nx + 35, ny, nz + 5)
+		local pst2 = World_Pos(nx + 35, ny, nz + 10)
+		--Castle 3
+		local psx3 = World_Pos(nx + -10, ny, nz + 5)
+		local pst3 = World_Pos(nx + -10, ny, nz + 10)
+		--blacksmith
+		local psx4 = World_Pos(nx + -95, ny, nz + 8)
+		local pst4 = World_Pos(nx + -95, ny, nz + 13)
+		--university
+		local psx5 = World_Pos(nx + -110, ny, nz + 8)
+		local pst5 = World_Pos(nx + -110, ny, nz + 13)
+		--Towers
+		local psx6 = World_Pos(nx + 45, ny, nz + -8)
+		local pst6 = World_Pos(nx + 45, ny, nz + -3)
+		local psx7 = World_Pos(nx - 25, ny, nz + -8)
+		local pst7 = World_Pos(nx - 25, ny, nz + -3)
+		
+		if math.ceil(ps.x) == startX and math.ceil(ps.y) == startY and math.ceil(ps.z) == startZ then
+			player.moveposition = Marker_GetPosition(Spawner1)
+			player.unitwalk = 20
+			player.unitwalkspawn = 20
+			player.spawnpositionvillager = Marker_GetPosition(Spawner11)
+			local player_civ = Player_GetRaceName(player.id)
+			local ebp_building
+			local ebp_building_bs
+			local ebp_building_uni
+			-- This checks which Civilization the player is using and gets the appropriate BLUEPRINTS for the House building
+			-- BLUEPRINTS are the instructions needed to create a SQUAD, ENTITY, or UPGRADE
+			if player_civ == "english" then
+				
+				-- Get the English House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_eng")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_eng")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_eng")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_eng")
+			elseif player_civ == "chinese" then
+	
+				-- Get the Chinese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi")
+			elseif player_civ == "french" then
+				
+				-- Get the French House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre")
+			elseif player_civ == "hre" then
+				
+				-- Get the HRE House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre")
+			elseif player_civ == "mongol" then
+				
+				-- Get the Mongol Ger Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mon")
+				
+			elseif player_civ == "rus" then
+				
+				-- Get the Rus House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_rus")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_rus")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_rus")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_wooden_fort_rus")
+				
+			elseif player_civ == "sultanate" then
+				
+				-- Get the Delhi Sultanate House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_sul")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_sul")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_sul")
+				
+			elseif player_civ == "abbasid" then
+				
+				-- Get the Abbasid House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb")
+			elseif player_civ == "malian" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_mal")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mal")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_mal")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mal")
+			elseif player_civ == "ottoman" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_ott")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_ott")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_ott")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_ott")
+			elseif player_civ == "japanese" then
+				
+				-- Get the Japanese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_jpn")
+				ebp_building_bs = BP_GetEntityBlueprint("building_econ_mining_camp_jpn")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_jpn")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_jpn")
+			elseif player_civ == "byzantine" then
+				
+				-- Get the Byzantine House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_byz")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_byz")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_byz")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_byz")
+			elseif player_civ == "abbasid_ha_01" then
+				
+				-- Get the Ayyubids House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb_ha_01")
+			elseif player_civ == "hre_ha_01" then
+				
+				-- Get the OOTD House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre_ha_01")
+			elseif player_civ == "french_ha_01" then
+				
+				-- Get the JeanARC House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre_ha_01")
+		
+			elseif player_civ == "chinese_ha_01" then
+				
+				-- Get the Xhu Zi House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi_ha_01")
+				
+			end
+			
+			local c1 = Entity_CreateFacing(ebp_building, player.id, psx, pst, true)
+			local c2 = Entity_CreateFacing(ebp_building, player.id, psx2, pst2, true)
+			local c3 = Entity_CreateFacing(ebp_building, player.id, psx3, pst3, true)
+			local bs = Entity_CreateFacing(ebp_building_bs, player.id, psx4, pst4, true)
+			local uni = Entity_CreateFacing(ebp_building_uni, player.id, psx5, pst5, true)
+			local tower = Entity_CreateFacing(ebp_building_tower, player.id, psx6, pst6, true)
+			local tower2 = Entity_CreateFacing(ebp_building_tower, player.id, psx7, pst7, true)
+			
+		
+					
+					Entity_Spawn(c1)
+					Entity_Spawn(c2)
+					Entity_Spawn(c3) 
+					Entity_Spawn(bs) 
+					Entity_Spawn(uni)
+			        Entity_Spawn(tower)
+			        Entity_Spawn(tower2)
+					Entity_ForceConstruct(c1)
+					Entity_ForceConstruct(c2)			
+					Entity_ForceConstruct(c3)
+					Entity_ForceConstruct(bs)			
+					Entity_ForceConstruct(uni)
+		        	Entity_ForceConstruct(tower)
+		        	Entity_ForceConstruct(tower2)
+					Entity_SnapToGridAndGround(c1, false) 
+					Entity_SnapToGridAndGround(c2, false)
+					Entity_SnapToGridAndGround(c3, false)
+					Entity_SnapToGridAndGround(bs, false) 
+					Entity_SnapToGridAndGround(uni, false)
+		            Entity_SnapToGridAndGround(tower, false)
+			        Entity_SnapToGridAndGround(tower2, false)
+				end
+			end
+		end
+-----------------------------------------Player 2---------------------------------------------------------------------------------------------------------------------------------
+function Mod_SpawnBuilding2()
+	for i, player in pairs(PLAYERS) do
+		local startX = 62
+		local startY = 8
+		local startZ = 184
+		local ps = Player_GetStartingPosition(player.id)
+		local nx = 5 * math.floor(math.floor(ps.x) / 5)
+		local ny = 5 * math.floor(math.floor(ps.y) / 5)
+		local nz = 5 * math.floor(math.floor(ps.z) / 5)
+		-- this is position at which building will appear
+		local psx = World_Pos(nx + 15, ny, nz + 5)
+		-- this vector is used for rotation target, so building is facing correctly toward camera
+		local pst = World_Pos(nx + 15, ny, nz + 10)
+		--Castle 2
+		local psx2 = World_Pos(nx + 32, ny, nz + 5)
+		local pst2 = World_Pos(nx + 32, ny, nz + 10)
+		--Castle 3
+		local psx3 = World_Pos(nx + -15, ny, nz + 5)
+		local pst3 = World_Pos(nx + -15, ny, nz + 10)
+		--blacksmith
+		local psx4 = World_Pos(nx + 115, ny, nz + 8)
+		local pst4 = World_Pos(nx + 115, ny, nz + 13)
+		--university
+		local psx5 = World_Pos(nx + 132, ny, nz + 8)
+		local pst5 = World_Pos(nx + 132, ny, nz + 13)
+		--Towers
+		local psx6 = World_Pos(nx + 45, ny, nz + -8)
+		local pst6 = World_Pos(nx + 45, ny, nz + -3)
+		local psx7 = World_Pos(nx - 25, ny, nz + -8)
+		local pst7 = World_Pos(nx - 25, ny, nz + -3)
+		
+		if math.ceil(ps.x) == startX and math.ceil(ps.y) == startY and math.ceil(ps.z) == startZ then
+			player.moveposition = Marker_GetPosition(Spawner2)
+			player.unitwalk = 20
+			player.unitwalkspawn = 20
+			player.spawnpositionvillager = Marker_GetPosition(Spawner22)
+			local player_civ = Player_GetRaceName(player.id)
+			local ebp_building
+			local ebp_building_bs
+			local ebp_building_uni
+			-- This checks which Civilization the player is using and gets the appropriate BLUEPRINTS for the House building
+			-- BLUEPRINTS are the instructions needed to create a SQUAD, ENTITY, or UPGRADE
+			if player_civ == "english" then
+		
+				-- Get the English House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_eng")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_eng")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_eng")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_eng")
+			elseif player_civ == "chinese" then
+				
+				-- Get the Chinese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi")
+			elseif player_civ == "french" then
+				
+				-- Get the French House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre")
+			elseif player_civ == "hre" then
+				
+				-- Get the HRE House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre")
+			elseif player_civ == "mongol" then
+				
+				-- Get the Mongol Ger Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mon")
+				
+			elseif player_civ == "rus" then
+				
+				-- Get the Rus House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_rus")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_rus")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_rus")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_wooden_fort_rus")
+				
+			elseif player_civ == "sultanate" then
+				
+				-- Get the Delhi Sultanate House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_sul")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_sul")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_sul")
+				
+			elseif player_civ == "abbasid" then
+				
+				-- Get the Abbasid House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb")
+			elseif player_civ == "malian" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_mal")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mal")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_mal")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mal")
+			elseif player_civ == "ottoman" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_ott")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_ott")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_ott")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_ott")
+			elseif player_civ == "japanese" then
+				
+				-- Get the Japanese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_jpn")
+				ebp_building_bs = BP_GetEntityBlueprint("building_econ_mining_camp_jpn")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_jpn")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_jpn")
+			elseif player_civ == "byzantine" then
+				
+				-- Get the Byzantine House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_byz")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_byz")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_byz")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_byz")
+			elseif player_civ == "abbasid_ha_01" then
+				
+				-- Get the Ayyubids House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb_ha_01")
+			elseif player_civ == "hre_ha_01" then
+				
+				-- Get the OOTD House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre_ha_01")
+			elseif player_civ == "french_ha_01" then
+				
+				-- Get the JeanARC House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre_ha_01")
+		
+			elseif player_civ == "chinese_ha_01" then
+				
+				-- Get the Xhu Zi House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi_ha_01")
+				
+			end
+			
+			local c1 = Entity_CreateFacing(ebp_building, player.id, psx, pst, true)
+			local c2 = Entity_CreateFacing(ebp_building, player.id, psx2, pst2, true)
+			local c3 = Entity_CreateFacing(ebp_building, player.id, psx3, pst3, true)
+			local bs = Entity_CreateFacing(ebp_building_bs, player.id, psx4, pst4, true)
+			local uni = Entity_CreateFacing(ebp_building_uni, player.id, psx5, pst5, true)
+			local tower = Entity_CreateFacing(ebp_building_tower, player.id, psx6, pst6, true)
+			local tower2 = Entity_CreateFacing(ebp_building_tower, player.id, psx7, pst7, true)
+			
+		
+					
+					Entity_Spawn(c1)
+					Entity_Spawn(c2)
+					Entity_Spawn(c3) 
+					Entity_Spawn(bs) 
+					Entity_Spawn(uni)
+			        Entity_Spawn(tower)
+			        Entity_Spawn(tower2)
+					Entity_ForceConstruct(c1)
+					Entity_ForceConstruct(c2)			
+					Entity_ForceConstruct(c3)
+					Entity_ForceConstruct(bs)			
+					Entity_ForceConstruct(uni)
+		        	Entity_ForceConstruct(tower)
+		        	Entity_ForceConstruct(tower2)
+					Entity_SnapToGridAndGround(c1, false) 
+					Entity_SnapToGridAndGround(c2, false)
+					Entity_SnapToGridAndGround(c3, false)
+					Entity_SnapToGridAndGround(bs, false) 
+					Entity_SnapToGridAndGround(uni, false)
+		            Entity_SnapToGridAndGround(tower, false)
+			        Entity_SnapToGridAndGround(tower2, false)
+		end
+	end
+end
+-----------------------------------------Player 3---------------------------------------------------------------------------------------------------------------------------------
+function Mod_SpawnBuilding3()
+	for i, player in pairs(PLAYERS) do
+		local startX = -184
+		local startY = 8
+		local startZ = 60		
+
+		local ps = Player_GetStartingPosition(player.id)
+		local nx = 5 * math.floor(math.floor(ps.x) / 5)
+		local ny = 5 * math.floor(math.floor(ps.y) / 5)
+		local nz = 5 * math.floor(math.floor(ps.z) / 5)
+		-- this is position at which building will appear
+		local psx = World_Pos(nx + 3, ny, nz + 18)
+		-- this vector is used for rotation target, so building is facing correctly toward camera
+		local pst = World_Pos(nx + 3, ny, nz + 23)
+		--Castle 2
+		local psx2 = World_Pos(nx + 3, ny, nz + 33)
+		local pst2 = World_Pos(nx + 3, ny, nz + 38)
+		--Castle 3
+		local psx3 = World_Pos(nx + 3, ny, nz + -15)
+		local pst3 = World_Pos(nx + 3, ny, nz + -10)
+		--blacksmith
+		local psx4 = World_Pos(nx + -5, ny, nz + 113)
+		local pst4 = World_Pos(nx + -5, ny, nz + 118)
+		--university
+		local psx5 = World_Pos(nx + 10, ny, nz + 113)
+		local pst5 = World_Pos(nx + 10, ny, nz + 118)
+		--Towers
+		local psx6 = World_Pos(nx + 15, ny, nz + 45)
+		local pst6 = World_Pos(nx + 15, ny, nz + 50)
+		local psx7 = World_Pos(nx + 15, ny, nz + -25)
+		local pst7 = World_Pos(nx + 15, ny, nz + -20)
+		if math.ceil(ps.x) == startX and math.ceil(ps.y) == startY and math.ceil(ps.z) == startZ then
+			player.moveposition = Marker_GetPosition(Spawner3)
+			player.unitwalk = 10
+			player.unitwalkspawn = 10
+			player.spawnpositionvillager = Marker_GetPosition(Spawner33)
+			local player_civ = Player_GetRaceName(player.id)
+			local ebp_building
+			local ebp_building_bs
+			local ebp_building_uni
+			-- This checks which Civilization the player is using and gets the appropriate BLUEPRINTS for the House building
+			-- BLUEPRINTS are the instructions needed to create a SQUAD, ENTITY, or UPGRADE
+			if player_civ == "english" then
+				
+				-- Get the English House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_eng")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_eng")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_eng")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_eng")
+			elseif player_civ == "chinese" then
+				
+				-- Get the Chinese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi")
+			elseif player_civ == "french" then
+				
+				-- Get the French House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre")
+			elseif player_civ == "hre" then
+				
+				-- Get the HRE House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre")
+			elseif player_civ == "mongol" then
+				
+				-- Get the Mongol Ger Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mon")
+				
+			elseif player_civ == "rus" then
+				
+				-- Get the Rus House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_rus")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_rus")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_rus")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_wooden_fort_rus")
+				
+			elseif player_civ == "sultanate" then
+				
+				-- Get the Delhi Sultanate House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_sul")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_sul")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_sul")
+				
+			elseif player_civ == "abbasid" then
+				
+				-- Get the Abbasid House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb")
+			elseif player_civ == "malian" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_mal")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mal")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_mal")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mal")
+			elseif player_civ == "ottoman" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_ott")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_ott")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_ott")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_ott")
+			elseif player_civ == "japanese" then
+				
+				-- Get the Japanese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_jpn")
+				ebp_building_bs = BP_GetEntityBlueprint("building_econ_mining_camp_jpn")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_jpn")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_jpn")
+			elseif player_civ == "byzantine" then
+				
+				-- Get the Byzantine House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_byz")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_byz")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_byz")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_byz")
+			elseif player_civ == "abbasid_ha_01" then
+				
+				-- Get the Ayyubids House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb_ha_01")
+			elseif player_civ == "hre_ha_01" then
+				
+				-- Get the OOTD House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre_ha_01")
+			elseif player_civ == "french_ha_01" then
+				
+				-- Get the JeanARC House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre_ha_01")
+		
+			elseif player_civ == "chinese_ha_01" then
+				
+				-- Get the Xhu Zi House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi_ha_01")
+				
+			end
+			
+			local c1 = Entity_CreateFacing(ebp_building, player.id, psx, pst, true)
+			local c2 = Entity_CreateFacing(ebp_building, player.id, psx2, pst2, true)
+			local c3 = Entity_CreateFacing(ebp_building, player.id, psx3, pst3, true)
+			local bs = Entity_CreateFacing(ebp_building_bs, player.id, psx4, pst4, true)
+			local uni = Entity_CreateFacing(ebp_building_uni, player.id, psx5, pst5, true)
+			local tower = Entity_CreateFacing(ebp_building_tower, player.id, psx6, pst6, true)
+			local tower2 = Entity_CreateFacing(ebp_building_tower, player.id, psx7, pst7, true)
+			
+		
+					
+					Entity_Spawn(c1)
+					Entity_Spawn(c2)
+					Entity_Spawn(c3) 
+					Entity_Spawn(bs) 
+					Entity_Spawn(uni)
+			        Entity_Spawn(tower)
+			        Entity_Spawn(tower2)
+					Entity_ForceConstruct(c1)
+					Entity_ForceConstruct(c2)			
+					Entity_ForceConstruct(c3)
+					Entity_ForceConstruct(bs)			
+					Entity_ForceConstruct(uni)
+		        	Entity_ForceConstruct(tower)
+		        	Entity_ForceConstruct(tower2)
+					Entity_SnapToGridAndGround(c1, false) 
+					Entity_SnapToGridAndGround(c2, false)
+					Entity_SnapToGridAndGround(c3, false)
+					Entity_SnapToGridAndGround(bs, false) 
+					Entity_SnapToGridAndGround(uni, false)
+		            Entity_SnapToGridAndGround(tower, false)
+			        Entity_SnapToGridAndGround(tower2, false)
+		end
+	end
+end
+-----------------------------------------Player 4---------------------------------------------------------------------------------------------------------------------------------
+function Mod_SpawnBuilding4()
+	for i, player in pairs(PLAYERS) do
+		local startX = 184
+		local startY = 8
+		local startZ = 60	
+		local ps = Player_GetStartingPosition(player.id)
+		local nx = 5 * math.floor(math.floor(ps.x) / 5)
+		local ny = 5 * math.floor(math.floor(ps.y) / 5)
+		local nz = 5 * math.floor(math.floor(ps.z) / 5)
+		-- this is position at which building will appear
+		local psx = World_Pos(nx + 3, ny, nz + 18)
+		-- this vector is used for rotation target, so building is facing correctly toward camera
+		local pst = World_Pos(nx + 3, ny, nz + 23)
+		--Castle 2
+		local psx2 = World_Pos(nx + 3, ny, nz + 33)
+		local pst2 = World_Pos(nx + 3, ny, nz + 38)
+		--Castle 3
+		local psx3 = World_Pos(nx + 3, ny, nz + -15)
+		local pst3 = World_Pos(nx + 3, ny, nz + -10)
+		--blacksmith
+		local psx4 = World_Pos(nx + 12, ny, nz + 113)
+		local pst4 = World_Pos(nx + 12, ny, nz + 118)
+		--university
+		local psx5 = World_Pos(nx + -5, ny, nz + 113)
+		local pst5 = World_Pos(nx + -5, ny, nz + 118)
+		--Towers
+		local psx6 = World_Pos(nx + -8, ny, nz + 45)
+		local pst6 = World_Pos(nx + -8, ny, nz + 50)
+		local psx7 = World_Pos(nx + -8, ny, nz + -25)
+		local pst7 = World_Pos(nx + -8, ny, nz + -20)
+		if math.ceil(ps.x) == startX and math.ceil(ps.y) == startY and math.ceil(ps.z) == startZ then
+			player.moveposition = Marker_GetPosition(Spawner4)
+			player.unitwalk = 30
+			player.unitwalkspawn = 30
+			player.spawnpositionvillager = Marker_GetPosition(Spawner44)
+			local player_civ = Player_GetRaceName(player.id)
+			local ebp_building
+			local ebp_building_bs
+			local ebp_building_uni
+			-- This checks which Civilization the player is using and gets the appropriate BLUEPRINTS for the House building
+			-- BLUEPRINTS are the instructions needed to create a SQUAD, ENTITY, or UPGRADE
+			if player_civ == "english" then
+				
+				-- Get the English House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_eng")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_eng")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_eng")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_eng")
+			elseif player_civ == "chinese" then
+				
+				-- Get the Chinese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi")
+			elseif player_civ == "french" then
+				
+				-- Get the French House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre")
+			elseif player_civ == "hre" then
+				
+				-- Get the HRE House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre")
+			elseif player_civ == "mongol" then
+				
+				-- Get the Mongol Ger Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mon")
+				
+			elseif player_civ == "rus" then
+				
+				-- Get the Rus House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_rus")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_rus")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_rus")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_wooden_fort_rus")
+				
+			elseif player_civ == "sultanate" then
+				
+				-- Get the Delhi Sultanate House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_sul")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_sul")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_sul")
+				
+			elseif player_civ == "abbasid" then
+				
+				-- Get the Abbasid House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb")
+			elseif player_civ == "malian" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_mal")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mal")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_mal")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mal")
+			elseif player_civ == "ottoman" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_ott")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_ott")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_ott")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_ott")
+			elseif player_civ == "japanese" then
+				
+				-- Get the Japanese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_jpn")
+				ebp_building_bs = BP_GetEntityBlueprint("building_econ_mining_camp_jpn")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_jpn")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_jpn")
+			elseif player_civ == "byzantine" then
+				
+				-- Get the Byzantine House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_byz")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_byz")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_byz")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_byz")
+			elseif player_civ == "abbasid_ha_01" then
+				
+				-- Get the Ayyubids House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb_ha_01")
+			elseif player_civ == "hre_ha_01" then
+				
+				-- Get the OOTD House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre_ha_01")
+			elseif player_civ == "french_ha_01" then
+				
+				-- Get the JeanARC House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre_ha_01")
+		
+			elseif player_civ == "chinese_ha_01" then
+				
+				-- Get the Xhu Zi House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi_ha_01")
+				
+			end
+			
+			local c1 = Entity_CreateFacing(ebp_building, player.id, psx, pst, true)
+			local c2 = Entity_CreateFacing(ebp_building, player.id, psx2, pst2, true)
+			local c3 = Entity_CreateFacing(ebp_building, player.id, psx3, pst3, true)
+			local bs = Entity_CreateFacing(ebp_building_bs, player.id, psx4, pst4, true)
+			local uni = Entity_CreateFacing(ebp_building_uni, player.id, psx5, pst5, true)
+			local tower = Entity_CreateFacing(ebp_building_tower, player.id, psx6, pst6, true)
+			local tower2 = Entity_CreateFacing(ebp_building_tower, player.id, psx7, pst7, true)
+			
+		
+					
+					Entity_Spawn(c1)
+					Entity_Spawn(c2)
+					Entity_Spawn(c3) 
+					Entity_Spawn(bs) 
+					Entity_Spawn(uni)
+			        Entity_Spawn(tower)
+			        Entity_Spawn(tower2)
+					Entity_ForceConstruct(c1)
+					Entity_ForceConstruct(c2)			
+					Entity_ForceConstruct(c3)
+					Entity_ForceConstruct(bs)			
+					Entity_ForceConstruct(uni)
+		        	Entity_ForceConstruct(tower)
+		        	Entity_ForceConstruct(tower2)
+					Entity_SnapToGridAndGround(c1, false) 
+					Entity_SnapToGridAndGround(c2, false)
+					Entity_SnapToGridAndGround(c3, false)
+					Entity_SnapToGridAndGround(bs, false) 
+					Entity_SnapToGridAndGround(uni, false)
+		            Entity_SnapToGridAndGround(tower, false)
+			        Entity_SnapToGridAndGround(tower2, false)
+		end 
+	end
+end
+-----------------------------------------Player 5---------------------------------------------------------------------------------------------------------------------------------
+function Mod_SpawnBuilding5()
+	for i, player in pairs(PLAYERS) do
+		local startX = -184
+		local startY = 8
+		local startZ = -76	
+		local ps = Player_GetStartingPosition(player.id)
+		local nx = 5 * math.floor(math.floor(ps.x) / 5)
+		local ny = 5 * math.floor(math.floor(ps.y) / 5)
+		local nz = 5 * math.floor(math.floor(ps.z) / 5)
+		-- this is position at which building will appear
+		local psx = World_Pos(nx + 3, ny, nz + 20)
+		-- this vector is used for rotation target, so building is facing correctly toward camera
+		local pst = World_Pos(nx + 3, ny, nz + 25)
+		--Castle 2
+		local psx2 = World_Pos(nx + 3, ny, nz + 35)
+		local pst2 = World_Pos(nx + 3, ny, nz + 40)
+		--Castle 3
+		local psx3 = World_Pos(nx + 3, ny, nz + -13)
+		local pst3 = World_Pos(nx + 3, ny, nz + -8)
+		--blacksmith
+		local psx4 = World_Pos(nx + -5, ny, nz + -93)
+		local pst4 = World_Pos(nx + -5, ny, nz + -88)
+		--university
+		local psx5 = World_Pos(nx + 10, ny, nz + -93)
+		local pst5 = World_Pos(nx + 10, ny, nz + -88)
+		--Towers
+		local psx6 = World_Pos(nx + 15, ny, nz + 45)
+		local pst6 = World_Pos(nx + 15, ny, nz + 50)
+		local psx7 = World_Pos(nx + 15, ny, nz + -25)
+		local pst7 = World_Pos(nx + 15, ny, nz + -20)
+		if math.ceil(ps.x) == startX and math.ceil(ps.y) == startY and math.ceil(ps.z) == startZ then
+			player.moveposition = Marker_GetPosition(Spawner5)
+			player.unitwalk = 10
+			player.unitwalkspawn = 10
+			player.spawnpositionvillager = Marker_GetPosition(Spawner55)
+			local player_civ = Player_GetRaceName(player.id)
+			local ebp_building
+			local ebp_building_bs
+			local ebp_building_uni
+			-- This checks which Civilization the player is using and gets the appropriate BLUEPRINTS for the House building
+			-- BLUEPRINTS are the instructions needed to create a SQUAD, ENTITY, or UPGRADE
+			if player_civ == "english" then
+				
+				-- Get the English House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_eng")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_eng")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_eng")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_eng")
+			elseif player_civ == "chinese" then
+				
+				-- Get the Chinese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi")
+			elseif player_civ == "french" then
+				
+				-- Get the French House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre")
+			elseif player_civ == "hre" then
+				
+				-- Get the HRE House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre")
+			elseif player_civ == "mongol" then
+				
+				-- Get the Mongol Ger Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mon")
+				
+			elseif player_civ == "rus" then
+				
+				-- Get the Rus House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_rus")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_rus")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_rus")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_wooden_fort_rus")
+				
+			elseif player_civ == "sultanate" then
+				
+				-- Get the Delhi Sultanate House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_sul")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_sul")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_sul")
+				
+			elseif player_civ == "abbasid" then
+				
+				-- Get the Abbasid House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb")
+			elseif player_civ == "malian" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_mal")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mal")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_mal")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mal")
+			elseif player_civ == "ottoman" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_ott")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_ott")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_ott")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_ott")
+			elseif player_civ == "japanese" then
+				
+				-- Get the Japanese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_jpn")
+				ebp_building_bs = BP_GetEntityBlueprint("building_econ_mining_camp_jpn")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_jpn")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_jpn")
+			elseif player_civ == "byzantine" then
+				
+				-- Get the Byzantine House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_byz")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_byz")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_byz")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_byz")
+			elseif player_civ == "abbasid_ha_01" then
+				
+				-- Get the Ayyubids House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb_ha_01")
+			elseif player_civ == "hre_ha_01" then
+				
+				-- Get the OOTD House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre_ha_01")
+			elseif player_civ == "french_ha_01" then
+				
+				-- Get the JeanARC House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre_ha_01")
+		
+			elseif player_civ == "chinese_ha_01" then
+				
+				-- Get the Xhu Zi House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi_ha_01")
+				
+			end
+			
+			local c1 = Entity_CreateFacing(ebp_building, player.id, psx, pst, true)
+			local c2 = Entity_CreateFacing(ebp_building, player.id, psx2, pst2, true)
+			local c3 = Entity_CreateFacing(ebp_building, player.id, psx3, pst3, true)
+			local bs = Entity_CreateFacing(ebp_building_bs, player.id, psx4, pst4, true)
+			local uni = Entity_CreateFacing(ebp_building_uni, player.id, psx5, pst5, true)
+			local tower = Entity_CreateFacing(ebp_building_tower, player.id, psx6, pst6, true)
+			local tower2 = Entity_CreateFacing(ebp_building_tower, player.id, psx7, pst7, true)
+			
+		
+					
+					Entity_Spawn(c1)
+					Entity_Spawn(c2)
+					Entity_Spawn(c3) 
+					Entity_Spawn(bs) 
+					Entity_Spawn(uni)
+			        Entity_Spawn(tower)
+			        Entity_Spawn(tower2)
+					Entity_ForceConstruct(c1)
+					Entity_ForceConstruct(c2)			
+					Entity_ForceConstruct(c3)
+					Entity_ForceConstruct(bs)			
+					Entity_ForceConstruct(uni)
+		        	Entity_ForceConstruct(tower)
+		        	Entity_ForceConstruct(tower2)
+					Entity_SnapToGridAndGround(c1, false) 
+					Entity_SnapToGridAndGround(c2, false)
+					Entity_SnapToGridAndGround(c3, false)
+					Entity_SnapToGridAndGround(bs, false) 
+					Entity_SnapToGridAndGround(uni, false)
+		            Entity_SnapToGridAndGround(tower, false)
+			        Entity_SnapToGridAndGround(tower2, false)
+		end
+	end
+end
+-----------------------------------------Player 6---------------------------------------------------------------------------------------------------------------------------------
+function Mod_SpawnBuilding6()
+	testTable = {}
+	for i, player in pairs(PLAYERS) do
+		local startX = 184
+        local startY = 8
+        local startZ = -76
+		local startPos = World_Pos(188.417, 7.72682, -85) 
+		local ps = Player_GetStartingPosition(player.id)
+		local nx = 5 * math.floor(math.floor(ps.x) / 5)   
+		local ny = 5 * math.floor(math.floor(ps.y) / 5)
+		local nz = 5 * math.floor(math.floor(ps.z) / 5)
+		-- this is position at which building will appear
+		local psx = World_Pos(nx + 3, ny, nz + 20)
+		-- this vector is used for rotation target, so building is facing correctly toward camera
+		local pst = World_Pos(nx + 3, ny, nz + 25)
+		--Castle 2
+		local psx2 = World_Pos(nx + 3, ny, nz + 35)
+		local pst2 = World_Pos(nx + 3, ny, nz + 40)
+		--Castle 3
+		local psx3 = World_Pos(nx + 3, ny, nz + -13)
+		local pst3 = World_Pos(nx + 3, ny, nz + -8)
+		--blacksmith
+		local psx4 = World_Pos(nx + -5, ny, nz + -93)
+		local pst4 = World_Pos(nx + -5, ny, nz + -88)
+		--university
+		local psx5 = World_Pos(nx + 12, ny, nz + -93)
+		local pst5 = World_Pos(nx + 12, ny, nz + -88)
+		--Towers
+		local psx6 = World_Pos(nx + -8, ny, nz + 45)
+		local pst6 = World_Pos(nx + -8, ny, nz + 50)
+		local psx7 = World_Pos(nx + -8, ny, nz + -25)
+		local pst7 = World_Pos(nx + -8, ny, nz + -20)
+		if math.ceil(ps.x) == startX and math.ceil(ps.y) == startY and math.ceil(ps.z) == startZ then
+			player.moveposition = Marker_GetPosition(Spawner6)
+			player.unitwalk = 30
+			player.unitwalkspawn = 30
+			player.spawnpositionvillager = Marker_GetPosition(Spawner66)
+			local player_civ = Player_GetRaceName(player.id)
+			local ebp_building
+			local ebp_building_bs
+			local ebp_building_uni
+			-- This checks which Civilization the player is using and gets the appropriate BLUEPRINTS for the House building
+			-- BLUEPRINTS are the instructions needed to create a SQUAD, ENTITY, or UPGRADE
+			if player_civ == "english" then
+				
+				-- Get the English House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_eng")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_eng")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_eng")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_eng")
+			elseif player_civ == "chinese" then
+				
+				-- Get the Chinese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi")
+			elseif player_civ == "french" then
+				
+				-- Get the French House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre")
+			elseif player_civ == "hre" then
+				
+				-- Get the HRE House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre")
+			elseif player_civ == "mongol" then
+				
+				-- Get the Mongol Ger Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mon")
+				
+			elseif player_civ == "rus" then
+				
+				-- Get the Rus House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_rus")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_rus")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_rus")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_wooden_fort_rus")
+				
+			elseif player_civ == "sultanate" then
+				
+				-- Get the Delhi Sultanate House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_sul")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_sul")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_sul")
+				
+			elseif player_civ == "abbasid" then
+				
+				-- Get the Abbasid House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb")
+			elseif player_civ == "malian" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_mal")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mal")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_mal")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mal")
+			elseif player_civ == "ottoman" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_ott")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_ott")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_ott")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_ott")
+			elseif player_civ == "japanese" then
+				
+				-- Get the Japanese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_jpn")
+				ebp_building_bs = BP_GetEntityBlueprint("building_econ_mining_camp_jpn")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_jpn")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_jpn")
+			elseif player_civ == "byzantine" then
+				
+				-- Get the Byzantine House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_byz")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_byz")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_byz")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_byz")
+			elseif player_civ == "abbasid_ha_01" then
+				
+				-- Get the Ayyubids House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb_ha_01")
+			elseif player_civ == "hre_ha_01" then
+				
+				-- Get the OOTD House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre_ha_01")
+			elseif player_civ == "french_ha_01" then
+				
+				-- Get the JeanARC House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre_ha_01")
+		
+			elseif player_civ == "chinese_ha_01" then
+				
+				-- Get the Xhu Zi House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi_ha_01")
+				
+			end
+			
+			local c1 = Entity_CreateFacing(ebp_building, player.id, psx, pst, true)
+			local c2 = Entity_CreateFacing(ebp_building, player.id, psx2, pst2, true)
+			local c3 = Entity_CreateFacing(ebp_building, player.id, psx3, pst3, true)
+			local bs = Entity_CreateFacing(ebp_building_bs, player.id, psx4, pst4, true)
+			local uni = Entity_CreateFacing(ebp_building_uni, player.id, psx5, pst5, true)
+			local tower = Entity_CreateFacing(ebp_building_tower, player.id, psx6, pst6, true)
+			local tower2 = Entity_CreateFacing(ebp_building_tower, player.id, psx7, pst7, true)
+			
+		
+					
+					Entity_Spawn(c1)
+					Entity_Spawn(c2)
+					Entity_Spawn(c3) 
+					Entity_Spawn(bs) 
+					Entity_Spawn(uni)
+			        Entity_Spawn(tower)
+			        Entity_Spawn(tower2)
+					Entity_ForceConstruct(c1)
+					Entity_ForceConstruct(c2)			
+					Entity_ForceConstruct(c3)
+					Entity_ForceConstruct(bs)			
+					Entity_ForceConstruct(uni)
+		        	Entity_ForceConstruct(tower)
+		        	Entity_ForceConstruct(tower2)
+					Entity_SnapToGridAndGround(c1, false) 
+					Entity_SnapToGridAndGround(c2, false)
+					Entity_SnapToGridAndGround(c3, false)
+					Entity_SnapToGridAndGround(bs, false) 
+					Entity_SnapToGridAndGround(uni, false)
+		            Entity_SnapToGridAndGround(tower, false)
+			        Entity_SnapToGridAndGround(tower2, false)
+		end
+	end
+end
+-----------------------------------------Player 7---------------------------------------------------------------------------------------------------------------------------------
+function Mod_SpawnBuilding7()
+	for i, player in pairs(PLAYERS) do
+		local startX = -76
+		local startY = 8
+		local startZ = -184
+		local ps = Player_GetStartingPosition(player.id)
+		local nx = 5 * math.floor(math.floor(ps.x) / 5)
+		local ny = 5 * math.floor(math.floor(ps.y) / 5)
+		local nz = 5 * math.floor(math.floor(ps.z) / 5)
+		-- this is position at which building will appear
+		local psx = World_Pos(nx + 20, ny, nz + 3)
+		-- this vector is used for rotation target, so building is facing correctly toward camera
+		local pst = World_Pos(nx + 20, ny, nz + 8)
+		--Castle 2
+		local psx2 = World_Pos(nx + 35, ny, nz + 3)
+		local pst2 = World_Pos(nx + 35, ny, nz + 8)
+		--Castle 3
+		local psx3 = World_Pos(nx + -13, ny, nz + 3)
+		local pst3 = World_Pos(nx + -13, ny, nz + 8)
+		--blacksmith
+		local psx4 = World_Pos(nx + -97, ny, nz + -3)
+		local pst4 = World_Pos(nx + -97, ny, nz + 2)
+		--university
+		local psx5 = World_Pos(nx + -113, ny, nz + -3)
+		local pst5 = World_Pos(nx + -113, ny, nz + 2)
+		--Towers
+		local psx6 = World_Pos(nx + 45, ny, nz + 13)
+		local pst6 = World_Pos(nx + 45, ny, nz + 18)
+		local psx7 = World_Pos(nx + -25, ny, nz + 13)
+		local pst7 = World_Pos(nx + -25, ny, nz + 18)
+		if math.ceil(ps.x) == startX and math.ceil(ps.y) == startY and math.ceil(ps.z) == startZ then
+			player.moveposition = Marker_GetPosition(Spawner7)
+			player.unitwalk = 0
+			player.unitwalkspawn = 0
+			player.spawnpositionvillager = Marker_GetPosition(Spawner77)
+			local player_civ = Player_GetRaceName(player.id)
+			local ebp_building
+			local ebp_building_bs
+			local ebp_building_uni
+			-- This checks which Civilization the player is using and gets the appropriate BLUEPRINTS for the House building
+			-- BLUEPRINTS are the instructions needed to create a SQUAD, ENTITY, or UPGRADE
+			if player_civ == "english" then
+				
+				-- Get the English House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_eng")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_eng")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_eng")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_eng")
+			elseif player_civ == "chinese" then
+				
+				-- Get the Chinese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi")
+			elseif player_civ == "french" then
+				
+				-- Get the French House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre")
+			elseif player_civ == "hre" then
+				
+				-- Get the HRE House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre")
+			elseif player_civ == "mongol" then
+				
+				-- Get the Mongol Ger Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mon")
+				
+			elseif player_civ == "rus" then
+				
+				-- Get the Rus House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_rus")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_rus")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_rus")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_wooden_fort_rus")
+				
+			elseif player_civ == "sultanate" then
+				
+				-- Get the Delhi Sultanate House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_sul")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_sul")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_sul")
+				
+			elseif player_civ == "abbasid" then
+				
+				-- Get the Abbasid House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb")
+			elseif player_civ == "malian" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_mal")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mal")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_mal")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mal")
+			elseif player_civ == "ottoman" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_ott")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_ott")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_ott")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_ott")
+			elseif player_civ == "japanese" then
+				
+				-- Get the Japanese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_jpn")
+				ebp_building_bs = BP_GetEntityBlueprint("building_econ_mining_camp_jpn")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_jpn")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_jpn")
+			elseif player_civ == "byzantine" then
+				
+				-- Get the Byzantine House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_byz")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_byz")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_byz")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_byz")
+			elseif player_civ == "abbasid_ha_01" then
+				
+				-- Get the Ayyubids House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb_ha_01")
+			elseif player_civ == "hre_ha_01" then
+				
+				-- Get the OOTD House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre_ha_01")
+			elseif player_civ == "french_ha_01" then
+				
+				-- Get the JeanARC House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre_ha_01")
+		
+			elseif player_civ == "chinese_ha_01" then
+				
+				-- Get the Xhu Zi House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi_ha_01")
+				
+			end
+			
+			local c1 = Entity_CreateFacing(ebp_building, player.id, psx, pst, true)
+			local c2 = Entity_CreateFacing(ebp_building, player.id, psx2, pst2, true)
+			local c3 = Entity_CreateFacing(ebp_building, player.id, psx3, pst3, true)
+			local bs = Entity_CreateFacing(ebp_building_bs, player.id, psx4, pst4, true)
+			local uni = Entity_CreateFacing(ebp_building_uni, player.id, psx5, pst5, true)
+			local tower = Entity_CreateFacing(ebp_building_tower, player.id, psx6, pst6, true)
+			local tower2 = Entity_CreateFacing(ebp_building_tower, player.id, psx7, pst7, true)
+			
+		
+					
+					Entity_Spawn(c1)
+					Entity_Spawn(c2)
+					Entity_Spawn(c3) 
+					Entity_Spawn(bs) 
+					Entity_Spawn(uni)
+			        Entity_Spawn(tower)
+			        Entity_Spawn(tower2)
+					Entity_ForceConstruct(c1)
+					Entity_ForceConstruct(c2)			
+					Entity_ForceConstruct(c3)
+					Entity_ForceConstruct(bs)			
+					Entity_ForceConstruct(uni)
+		        	Entity_ForceConstruct(tower)
+		        	Entity_ForceConstruct(tower2)
+					Entity_SnapToGridAndGround(c1, false) 
+					Entity_SnapToGridAndGround(c2, false)
+					Entity_SnapToGridAndGround(c3, false)
+					Entity_SnapToGridAndGround(bs, false) 
+					Entity_SnapToGridAndGround(uni, false)
+		            Entity_SnapToGridAndGround(tower, false)
+			        Entity_SnapToGridAndGround(tower2, false)
+		end	
+	end
+end
+-----------------------------------------Player 8---------------------------------------------------------------------------------------------------------------------------------
+function Mod_SpawnBuilding8()
+	for i, player in pairs(PLAYERS) do
+		local startX = 60
+		local startY = 8
+		local startZ = -184
+		local ps = Player_GetStartingPosition(player.id)
+		local nx = 5 * math.floor(math.floor(ps.x) / 5)
+		local ny = 5 * math.floor(math.floor(ps.y) / 5)
+		local nz = 5 * math.floor(math.floor(ps.z) / 5)
+		-- this is position at which building will appear
+		local psx = World_Pos(nx + 18, ny, nz + 3)
+		-- this vector is used for rotation target, so building is facing correctly toward camera
+		local pst = World_Pos(nx + 18, ny, nz + 8)
+		--Castle 2
+		local psx2 = World_Pos(nx + 33, ny, nz + 3)
+		local pst2 = World_Pos(nx + 33, ny, nz + 8)
+		--Castle 3
+		local psx3 = World_Pos(nx + -15, ny, nz + 3)
+		local pst3 = World_Pos(nx + -15, ny, nz + 8)
+		--blacksmith
+		local psx4 = World_Pos(nx + 115, ny, nz + -3)
+		local pst4 = World_Pos(nx + 115, ny, nz + 2)
+		--university
+		local psx5 = World_Pos(nx + 132, ny, nz + -3)
+		local pst5 = World_Pos(nx + 132, ny, nz + 2)
+		--Towers
+		local psx6 = World_Pos(nx + 45, ny, nz + 13)
+		local pst6 = World_Pos(nx + 45, ny, nz + 18)
+		local psx7 = World_Pos(nx + -25, ny, nz + 13)
+		local pst7 = World_Pos(nx + -25, ny, nz + 18)
+		if math.ceil(ps.x) == startX and math.ceil(ps.y) == startY and math.ceil(ps.z) == startZ then
+			player.moveposition = Marker_GetPosition(Spawner8)
+			player.unitwalk = 0
+			player.unitwalkspawn = 0
+			player.spawnpositionvillager = Marker_GetPosition(Spawner88)
+			local player_civ = Player_GetRaceName(player.id)
+			local ebp_building
+			local ebp_building_bs
+			local ebp_building_uni
+			-- This checks which Civilization the player is using and gets the appropriate BLUEPRINTS for the House building
+			-- BLUEPRINTS are the instructions needed to create a SQUAD, ENTITY, or UPGRADE
+			if player_civ == "english" then
+				
+				-- Get the English House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_eng")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_eng")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_eng")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_eng")
+			elseif player_civ == "chinese" then
+				
+				-- Get the Chinese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi")
+			elseif player_civ == "french" then
+				
+				-- Get the French House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre")
+			elseif player_civ == "hre" then
+				
+				-- Get the HRE House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre")
+			elseif player_civ == "mongol" then
+				
+				-- Get the Mongol Ger Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_unit_infantry_mon")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mon")
+				
+			elseif player_civ == "rus" then
+				
+				-- Get the Rus House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_rus")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_rus")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_rus")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_wooden_fort_rus")
+				
+			elseif player_civ == "sultanate" then
+				
+				-- Get the Delhi Sultanate House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_sul")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_sul")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_sul")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_sul")
+				
+			elseif player_civ == "abbasid" then
+				
+				-- Get the Abbasid House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb")
+			elseif player_civ == "malian" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_mal")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_mal")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_mal")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_mal")
+			elseif player_civ == "ottoman" then
+				
+				-- Get the Malians House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_ott")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_ott")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_ott")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_ott")
+			elseif player_civ == "japanese" then
+				
+				-- Get the Japanese House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_jpn")
+				ebp_building_bs = BP_GetEntityBlueprint("building_econ_mining_camp_jpn")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_jpn")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_jpn")
+			elseif player_civ == "byzantine" then
+				
+				-- Get the Byzantine House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_byz")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_byz")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_byz")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_byz")
+			elseif player_civ == "abbasid_ha_01" then
+				
+				-- Get the Ayyubids House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_control_abb_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_abb_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_abb_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_control_abb_ha_01")
+			elseif player_civ == "hre_ha_01" then
+				
+				-- Get the OOTD House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_hre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_hre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_hre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_hre_ha_01")
+			elseif player_civ == "french_ha_01" then
+				
+				-- Get the JeanARC House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_fre_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_fre_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_fre_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_fre_ha_01")
+		
+			elseif player_civ == "chinese_ha_01" then
+				
+				-- Get the Xhu Zi House Blueprint
+				ebp_building = BP_GetEntityBlueprint("building_defense_keep_chi_ha_01")
+				ebp_building_bs = BP_GetEntityBlueprint("building_tech_unit_infantry_control_chi_ha_01")
+				ebp_building_uni = BP_GetEntityBlueprint("building_tech_university_control_chi_ha_01")
+				ebp_building_tower = BP_GetEntityBlueprint("building_defense_outpost_chi_ha_01")
+				
+			end
+			
+			local c1 = Entity_CreateFacing(ebp_building, player.id, psx, pst, true)
+			local c2 = Entity_CreateFacing(ebp_building, player.id, psx2, pst2, true)
+			local c3 = Entity_CreateFacing(ebp_building, player.id, psx3, pst3, true)
+			local bs = Entity_CreateFacing(ebp_building_bs, player.id, psx4, pst4, true)
+			local uni = Entity_CreateFacing(ebp_building_uni, player.id, psx5, pst5, true)
+			local tower = Entity_CreateFacing(ebp_building_tower, player.id, psx6, pst6, true)
+			local tower2 = Entity_CreateFacing(ebp_building_tower, player.id, psx7, pst7, true)
+			
+		
+					
+					Entity_Spawn(c1)
+					Entity_Spawn(c2)
+					Entity_Spawn(c3) 
+					Entity_Spawn(bs) 
+					Entity_Spawn(uni)
+			        Entity_Spawn(tower)
+			        Entity_Spawn(tower2)
+					Entity_ForceConstruct(c1)
+					Entity_ForceConstruct(c2)			
+					Entity_ForceConstruct(c3)
+					Entity_ForceConstruct(bs)			
+					Entity_ForceConstruct(uni)
+		        	Entity_ForceConstruct(tower)
+		        	Entity_ForceConstruct(tower2)
+					Entity_SnapToGridAndGround(c1, false) 
+					Entity_SnapToGridAndGround(c2, false)
+					Entity_SnapToGridAndGround(c3, false)
+					Entity_SnapToGridAndGround(bs, false) 
+					Entity_SnapToGridAndGround(uni, false)
+		            Entity_SnapToGridAndGround(tower, false)
+			        Entity_SnapToGridAndGround(tower2, false)
+	
+		end
+	end
+end
